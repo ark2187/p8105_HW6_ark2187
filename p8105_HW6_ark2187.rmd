@@ -1,0 +1,175 @@
+---
+title: "Hw 5"
+author: "Amanda Kramer"
+collaborator: "Charles Biggar aka also Amanda Kramer"
+note: "this is Charles Biggar's computer, so it will show him as a collaborator"
+date: 12/13/20
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(modelr)
+library(mgcv)
+library(purrr)
+library(rvest)
+```
+
+* I'm sorry there are so few commits and knitting, I ended up doing the whole thing on Sunday after I finally felt up to it, so theres limited info on github!
+
+
+## Problem 1
+
+```{r, message = FALSE}
+homicide_df = 
+  read_csv("homicide-data.csv", na = c("", "NA", "Unknown")) %>%
+  mutate( city_state = str_c(city, state, sep = "_"),
+          victim_age = as.numeric(victim_age),
+    resolved = case_when(
+      disposition == "Closed without arrest" ~ 0,
+      disposition == "Open/No arrest" ~ 0,
+      disposition == "Closed by arrest" ~ 1,
+    )) %>%
+  filter(city_state != "Tulsa_AL") %>%
+  filter(victim_race %in% c("White", "Black")) %>%
+  select(city_state, resolved, victim_age, victim_race, victim_sex)
+  
+```
+
+```{r}
+baltimore_df = homicide_df %>%
+  filter(city_state == "Baltimore_MD")
+glm(resolved ~ victim_age + victim_race + victim_sex, 
+    data= baltimore_df,
+    family = binomial()) %>%
+broom::tidy() %>%
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  ) %>%
+  select(term, OR, starts_with("CI")) %>%
+  knitr::kable(digits = 3)
+  
+```
+
+
+```{r}
+model_results_df = homicide_df %>%
+  nest(data = -city_state) %>%
+  mutate(
+    models = map(.x = data, ~glm(resolved ~ victim_age + victim_race + victim_sex, data= .x, family = binomial())), 
+    results = map(models, broom::tidy)
+  ) %>%
+  select(city_state, results) %>%
+  unnest(results) %>%
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  )
+model_results_df %>%
+  filter(term == "victim_sexMale") %>%
+  mutate(city_state = fct_reorder(city_state, OR)) %>%
+  ggplot(aes(x = city_state, y = OR)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+## Problem 2
+```{r, message=FALSE}
+birthweight_df = 
+  read_csv("birthweight.csv", na = c("", "NA", "Unknown")) %>%
+  mutate(babysex = as.factor(babysex), mrace = as.factor(mrace))
+```
+
+I am a PopFam student who analyzes data similar to this quite frequently. I decided to include common factors such as babies length, gestational age, mothers race (minority stress has been shown to impact birth weight), malformations, previous number of low weight births, and cigarettes smoked in my model. However, malformations and previous number of low weight babies did not have enough variation. 
+
+```{r}
+train_df = sample_n(birthweight_df, 320)
+test_df = anti_join(birthweight_df, train_df)
+my_mod = lm(bwt ~ blength + mrace + gaweeks + smoken, data = train_df)
+rmse(my_mod, train_df)
+train_df %>% 
+  add_predictions(my_mod) %>%
+  add_residuals(my_mod) %>%
+  ggplot(aes(x=bwt, y=pred)) +
+  geom_point()
+train_df %>% 
+  add_predictions(my_mod) %>%
+  add_residuals(my_mod) %>%
+  ggplot(aes(x=resid)) +
+  geom_density()
+```
+The residuals look good. They are normally distributed.
+
+Additional models:
+
+```{r}
+lenage_mod = lm(bwt ~ blength + gaweeks, data = train_df)
+lensexhead_mod = lm(bwt ~ bhead*blength*babysex + bhead*blength + bhead*babysex + blength*babysex, data= train_df)
+train_df %>% 
+  gather_predictions(my_mod, lenage_mod, lensexhead_mod) %>%
+  gather_residuals(my_mod, lenage_mod, lensexhead_mod)
+cv_df = 
+  crossv_mc(birthweight_df, 50) %>%
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)) %>%
+   mutate(
+    my_mod  = map(train, ~lm(bwt ~ blength + mrace + gaweeks + smoken, data = train_df)),
+    lenage_mod  = map(train, ~lm(bwt ~ blength + gaweeks, data = train_df)),
+    headlensex_mod  = map(train, ~lm(bwt ~ bhead*blength*babysex + bhead*blength + bhead*babysex + blength*babysex, data= train_df))) %>% 
+  mutate(
+    rmse_my = map2_dbl(my_mod, test, ~rmse(model = .x, data = .y)),
+    rmse_lenage = map2_dbl(lenage_mod, test, ~rmse(model = .x, data = .y)),
+    rmse_headlensex = map2_dbl(headlensex_mod, test, ~rmse(model = .x, data = .y)))
+  
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+```
+
+
+I did not expect sex to be as important a predictor as it was. Additonally, was also surprising to me head circumference.
+
+## Problem 3
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+weather_bootstrap_results = weather_df %>% 
+  modelr::bootstrap(n = 5000) %>% 
+  mutate(
+    models = map(strap, ~lm(tmax ~ tmin, data = .x) ),
+    results = map(models, broom::tidy),
+    r2 = map2_dbl(models, strap, ~rmse(model = .x, data = .y)))%>%
+  select(-strap, -models) %>% 
+  unnest(results) %>% 
+  pivot_wider(names_from = term, values_from = estimate:r2) %>% 
+  janitor::clean_names() %>%
+  mutate(calc = log(estimate_intercept * estimate_tmin)) %>%
+  summarize(
+    r2_ci_lower = quantile(r2_tmin, 0.025), 
+    r2_ci_upper = quantile(r2_tmin, 0.975),
+    calc_ci_lower = quantile(calc, 0.025), 
+    calc_ci_upper = quantile(calc, 0.975)) 
+weather_bootstrap_results %>% knitr::kable()
+```
+
